@@ -1,0 +1,28 @@
+# Web server
+flask>=3.0
+flask-cors>=4.0
+
+# Core image processing
+pillow>=9.5.0,<10.0.0
+numpy>=1.24
+opencv-python>=4.8
+
+torch>=2.0
+torchvision>=0.15
+
+# Background removal
+rembg>=2.0.50
+
+# Text-guided segmentation
+groundingdino-py==0.4.0
+segment-anything-py>=1.0.0
+
+transformers==4.30.2
+
+# Inpainting
+simple-lama-inpainting==0.1.2
+
+# Optional LLM
+anthropic>=0.20.0
+
+onnxruntime

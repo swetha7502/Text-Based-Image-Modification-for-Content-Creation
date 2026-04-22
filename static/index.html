@@ -1,0 +1,752 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>PixEdit</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet"/>
+<style>
+/* ── reset & tokens ───────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #080808;
+  --surface:  #111111;
+  --border:   #1f1f1f;
+  --border2:  #2c2c2c;
+  --accent:   #b8ff57;
+  --accent2:  #e5ff9e;
+  --text:     #efefef;
+  --muted:    #555;
+  --muted2:   #777;
+  --danger:   #ff5757;
+  --r:        3px;
+  --font-ui:  'JetBrains Mono', monospace;
+  --font-dis: 'Syne', sans-serif;
+}
+
+html, body { height: 100%; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ── header ───────────────────────────────────────────────────────────── */
+header {
+  height: 52px;
+  display: flex;
+  align-items: center;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  gap: 16px;
+}
+
+.logo {
+  font-family: var(--font-dis);
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: -1px;
+  color: var(--accent);
+  line-height: 1;
+}
+
+.logo-sub {
+  color: var(--muted2);
+  font-size: 11px;
+  font-weight: 300;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+
+header .spacer { flex: 1; }
+
+.status-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+  animation: pulse 2s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.4; }
+}
+
+.header-tag {
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px solid var(--border2);
+  padding: 4px 10px;
+  border-radius: 2px;
+}
+
+/* ── main layout ──────────────────────────────────────────────────────── */
+.workspace {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr auto;
+  overflow: hidden;
+}
+
+/* ── panels ───────────────────────────────────────────────────────────── */
+.panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+
+.panel-left  { border-right: 1px solid var(--border); }
+.panel-right { }
+
+.panel-label {
+  font-size: 9px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 10px 16px 6px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.panel-label::before {
+  content: '';
+  display: inline-block;
+  width: 3px; height: 3px;
+  background: var(--accent);
+  border-radius: 50%;
+}
+
+/* ── image drop zone ──────────────────────────────────────────────────── */
+.drop-zone {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  cursor: pointer;
+  transition: background 0.2s;
+  position: relative;
+  user-select: none;
+}
+.drop-zone:hover  { background: rgba(184,255,87,0.02); }
+.drop-zone.over   { background: rgba(184,255,87,0.05); }
+.drop-zone.hidden { display: none; }
+
+.drop-icon {
+  width: 60px; height: 60px;
+  border: 1px solid var(--border2);
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.2s;
+}
+.drop-zone:hover .drop-icon { border-color: var(--accent); }
+.drop-icon svg { width: 22px; height: 22px; stroke: var(--muted2); transition: stroke 0.2s; }
+.drop-zone:hover .drop-icon svg { stroke: var(--accent); }
+
+.drop-text {
+  text-align: center;
+  color: var(--muted2);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.drop-text strong { color: var(--text); font-weight: 500; display: block; margin-bottom: 2px; }
+.drop-formats { font-size: 10px; color: var(--muted); letter-spacing: 1px; }
+
+/* ── image preview ────────────────────────────────────────────────────── */
+.img-frame {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  display: none;
+  background: #0a0a0a;
+}
+.img-frame.active { display: flex; align-items: center; justify-content: center; }
+
+.img-frame img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.img-actions {
+  position: absolute;
+  top: 10px; right: 10px;
+  display: flex; gap: 6px;
+}
+
+.icon-btn {
+  width: 30px; height: 30px;
+  background: rgba(8,8,8,0.85);
+  border: 1px solid var(--border2);
+  border-radius: var(--r);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s;
+  color: var(--muted2);
+}
+.icon-btn:hover { border-color: var(--accent); color: var(--accent); }
+.icon-btn svg { width: 14px; height: 14px; }
+
+/* ── result area ──────────────────────────────────────────────────────── */
+.result-area {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0a0a0a;
+}
+
+.result-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: var(--muted);
+  text-align: center;
+}
+.result-placeholder .big-icon {
+  font-size: 36px;
+  opacity: 0.15;
+  font-family: var(--font-dis);
+  font-weight: 800;
+  letter-spacing: -2px;
+  color: var(--accent);
+}
+.result-placeholder p { font-size: 11px; line-height: 1.7; color: var(--muted); }
+
+.result-img-wrap {
+  width: 100%; height: 100%;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+.result-img-wrap.active { display: flex; }
+.result-img-wrap img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+/* ── spinner ──────────────────────────────────────────────────────────── */
+.spinner {
+  position: absolute;
+  inset: 0;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  background: rgba(8,8,8,0.8);
+  backdrop-filter: blur(4px);
+  z-index: 10;
+}
+.spinner.active { display: flex; }
+
+.spin-ring {
+  width: 44px; height: 44px;
+  border: 1.5px solid var(--border2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.spin-label {
+  font-size: 11px;
+  color: var(--muted2);
+  letter-spacing: 1px;
+}
+
+/* ── bottom bar ───────────────────────────────────────────────────────── */
+.bottom-bar {
+  grid-column: 1 / -1;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  flex-shrink: 0;
+}
+
+/* quick prompts row */
+.quick-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.ql { font-size: 9px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); margin-right: 4px; }
+
+.chip {
+  font-size: 10px;
+  padding: 4px 11px;
+  border: 1px solid var(--border2);
+  border-radius: 20px;
+  cursor: pointer;
+  color: var(--muted2);
+  transition: all 0.15s;
+  white-space: nowrap;
+  background: transparent;
+}
+.chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(184,255,87,0.05);
+}
+
+/* intent preview */
+.intent-row {
+  padding: 4px 16px;
+  min-height: 22px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.intent-badge {
+  font-size: 9px;
+  letter-spacing: 1px;
+  padding: 2px 8px;
+  border-radius: 2px;
+  text-transform: uppercase;
+  display: none;
+}
+.intent-badge.filter   { background: #131f00; color: var(--accent); border: 1px solid #2a4000; display: inline-block; }
+.intent-badge.remove   { background: #1f0000; color: #ff8080; border: 1px solid #400000; display: inline-block; }
+.intent-badge.bg_remove{ background: #00101f; color: #80c8ff; border: 1px solid #00264d; display: inline-block; }
+
+.intent-detail { font-size: 10px; color: var(--muted2); }
+
+/* prompt input row */
+.prompt-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  padding: 10px 16px;
+}
+
+.prompt-input {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border2);
+  border-right: none;
+  border-radius: var(--r) 0 0 var(--r);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  padding: 10px 14px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.prompt-input::placeholder { color: var(--muted); }
+.prompt-input:focus { border-color: var(--accent); }
+
+.run-btn {
+  background: var(--accent);
+  color: #080808;
+  border: none;
+  padding: 10px 24px;
+  border-radius: 0 var(--r) var(--r) 0;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 1px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+.run-btn:hover   { background: var(--accent2); }
+.run-btn:disabled { background: var(--border2); color: var(--muted); cursor: not-allowed; }
+
+/* result status bar */
+.result-bar {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  background: rgba(8,8,8,0.9);
+  border-top: 1px solid var(--border);
+  padding: 8px 12px;
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  backdrop-filter: blur(4px);
+}
+.result-bar.active { display: flex; }
+
+.result-action-tag {
+  font-size: 9px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  padding: 3px 10px;
+  border-radius: 2px;
+  border: 1px solid transparent;
+}
+.rat-filter   { color: var(--accent); border-color: #2a4000; background: #0e1a00; }
+.rat-remove   { color: #ff8080;       border-color: #400000; background: #1a0000; }
+.rat-bg_remove{ color: #80c8ff;       border-color: #003366; background: #001a33; }
+
+.dl-btn {
+  background: transparent;
+  border: 1px solid var(--border2);
+  color: var(--muted2);
+  padding: 5px 14px;
+  border-radius: var(--r);
+  font-family: var(--font-ui);
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.dl-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── toast ────────────────────────────────────────────────────────────── */
+.toast {
+  position: fixed;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%) translateY(20px);
+  background: #1a0000;
+  border: 1px solid #550000;
+  color: var(--danger);
+  padding: 10px 20px;
+  border-radius: var(--r);
+  font-size: 12px;
+  max-width: 420px;
+  text-align: center;
+  opacity: 0;
+  transition: opacity 0.25s, transform 0.25s;
+  pointer-events: none;
+  z-index: 100;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ── responsive ───────────────────────────────────────────────────────── */
+@media (max-width: 680px) {
+  .workspace {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr 1fr auto;
+  }
+  .panel-left { border-right: none; border-bottom: 1px solid var(--border); }
+}
+</style>
+</head>
+<body>
+
+<!-- ── Header ─────────────────────────────────────────────────────────────── -->
+<header>
+  <div>
+    <div class="logo">PixEdit</div>
+  </div>
+  <div class="logo-sub">CV · text-guided</div>
+  <div class="spacer"></div>
+  <div class="status-dot" title="Ready"></div>
+  <div class="header-tag">local models</div>
+</header>
+
+<!-- ── Workspace ──────────────────────────────────────────────────────────── -->
+<div class="workspace">
+
+  <!-- Left: input image -->
+  <div class="panel panel-left">
+    <div class="panel-label">input</div>
+
+    <div class="drop-zone" id="drop-zone">
+      <input type="file" id="file-input" accept="image/*" style="display:none"/>
+      <div class="drop-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+      </div>
+      <div class="drop-text">
+        <strong>Drop image here</strong>
+        or click to browse
+        <div class="drop-formats">JPG · PNG · WEBP · GIF</div>
+      </div>
+    </div>
+
+    <div class="img-frame" id="img-frame">
+      <img id="preview-img" src="" alt="input"/>
+      <div class="img-actions">
+        <div class="icon-btn" id="clear-btn" title="Clear image">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right: result -->
+  <div class="panel panel-right">
+    <div class="panel-label">output</div>
+
+    <div class="result-area">
+      <div class="result-placeholder" id="result-placeholder">
+        <div class="big-icon">◈</div>
+        <p>Upload an image<br/>then describe what to change.</p>
+      </div>
+
+      <div class="spinner" id="spinner">
+        <div class="spin-ring"></div>
+        <div class="spin-label" id="spin-label">processing…</div>
+      </div>
+
+      <div class="result-img-wrap" id="result-wrap">
+        <img id="result-img" src="" alt="result"/>
+      </div>
+
+      <div class="result-bar" id="result-bar">
+        <span class="result-action-tag" id="result-tag"></span>
+        <button class="dl-btn" onclick="downloadResult()">↓ save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom: controls (spans full width) -->
+  <div class="bottom-bar">
+
+    <!-- Quick prompt chips -->
+    <div class="quick-row">
+      <span class="ql">try:</span>
+      <button class="chip" onclick="setPrompt('remove the person')">remove person</button>
+      <button class="chip" onclick="setPrompt('cut out background')">cut out bg</button>
+      <button class="chip" onclick="setPrompt('make it cinematic')">cinematic</button>
+      <button class="chip" onclick="setPrompt('vintage film grain')">vintage</button>
+      <button class="chip" onclick="setPrompt('noir')">noir</button>
+      <button class="chip" onclick="setPrompt('lofi coffee shop vibe')">lofi</button>
+      <button class="chip" onclick="setPrompt('dreamy pastel')">dreamy</button>
+      <button class="chip" onclick="setPrompt('neon cyberpunk glow')">neon</button>
+      <button class="chip" onclick="setPrompt('golden hour sunset')">sunset</button>
+      <button class="chip" onclick="setPrompt('dark stormy mood')">dramatic</button>
+      <button class="chip" onclick="setPrompt('remove the car')">remove car</button>
+      <button class="chip" onclick="setPrompt('warm summer light')">warm</button>
+    </div>
+
+    <!-- Live intent preview -->
+    <div class="intent-row">
+      <span class="intent-badge" id="intent-badge"></span>
+      <span class="intent-detail" id="intent-detail"></span>
+    </div>
+
+    <!-- Prompt input -->
+    <div class="prompt-row">
+      <input class="prompt-input" id="prompt-input" type="text"
+             placeholder="describe the edit — remove the dog / cinematic look / cut out background…"
+             autocomplete="off" spellcheck="false"/>
+      <button class="run-btn" id="run-btn">run →</button>
+    </div>
+
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<!-- ── JS ─────────────────────────────────────────────────────────────────── -->
+<script>
+/* ── state ────────────────────────────────────────────────────────────── */
+let srcDataUri   = null;
+let resultUri    = null;
+
+/* ── element refs ─────────────────────────────────────────────────────── */
+const dropZone     = document.getElementById('drop-zone');
+const fileInput    = document.getElementById('file-input');
+const imgFrame     = document.getElementById('img-frame');
+const previewImg   = document.getElementById('preview-img');
+const clearBtn     = document.getElementById('clear-btn');
+const promptInput  = document.getElementById('prompt-input');
+const runBtn       = document.getElementById('run-btn');
+const spinner      = document.getElementById('spinner');
+const spinLabel    = document.getElementById('spin-label');
+const resultPlace  = document.getElementById('result-placeholder');
+const resultWrap   = document.getElementById('result-wrap');
+const resultImg    = document.getElementById('result-img');
+const resultBar    = document.getElementById('result-bar');
+const resultTag    = document.getElementById('result-tag');
+const intentBadge  = document.getElementById('intent-badge');
+const intentDetail = document.getElementById('intent-detail');
+const toast        = document.getElementById('toast');
+
+/* ── file loading ─────────────────────────────────────────────────────── */
+dropZone.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', e => loadFile(e.target.files[0]));
+
+dropZone.addEventListener('dragover',  e => { e.preventDefault(); dropZone.classList.add('over'); });
+dropZone.addEventListener('dragleave', ()=> dropZone.classList.remove('over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('over');
+  loadFile(e.dataTransfer.files[0]);
+});
+
+function loadFile(file) {
+  if (!file || !file.type.startsWith('image/')) {
+    showToast('Please drop an image file (jpg, png, webp).');
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = ev => {
+    srcDataUri = ev.target.result;
+    previewImg.src = srcDataUri;
+    dropZone.classList.add('hidden');
+    imgFrame.classList.add('active');
+  };
+  reader.readAsDataURL(file);
+}
+
+clearBtn.addEventListener('click', () => {
+  srcDataUri = null;
+  previewImg.src = '';
+  imgFrame.classList.remove('active');
+  dropZone.classList.remove('hidden');
+  fileInput.value = '';
+});
+
+/* ── live intent preview ──────────────────────────────────────────────── */
+let _debTimer = null;
+promptInput.addEventListener('input', () => {
+  clearTimeout(_debTimer);
+  const p = promptInput.value.trim();
+  if (!p) { clearIntent(); return; }
+  _debTimer = setTimeout(() => previewIntent(p), 350);
+});
+
+async function previewIntent(p) {
+  try {
+    const r = await fetch('/parse', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: p }),
+    });
+    const intent = await r.json();
+    showIntent(intent);
+  } catch { clearIntent(); }
+}
+
+function showIntent(intent) {
+  const action = intent.action || '';
+  intentBadge.textContent = action.replace('_', ' ');
+  intentBadge.className   = 'intent-badge ' + action;
+
+  const detail = intent.filter
+    ? `→ ${intent.filter}`
+    : intent.object
+    ? `→ "${intent.object}"`
+    : '';
+  intentDetail.textContent = detail;
+}
+
+function clearIntent() {
+  intentBadge.className   = 'intent-badge';
+  intentBadge.textContent = '';
+  intentDetail.textContent = '';
+}
+
+/* ── run edit ─────────────────────────────────────────────────────────── */
+runBtn.addEventListener('click', runEdit);
+promptInput.addEventListener('keydown', e => { if (e.key === 'Enter') runEdit(); });
+
+async function runEdit() {
+  if (!srcDataUri)                 { showToast('Upload an image first.'); return; }
+  const prompt = promptInput.value.trim();
+  if (!prompt)                     { showToast('Enter a prompt.'); return; }
+
+  setLoading(true, 'processing…');
+
+  try {
+    const res  = await fetch('/edit', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ image: srcDataUri, prompt }),
+    });
+    const json = await res.json();
+
+    if (!res.ok) {
+      showToast(json.error || 'Server error');
+      setLoading(false);
+      return;
+    }
+
+    resultUri     = json.result;
+    resultImg.src = resultUri;
+
+    resultPlace.style.display = 'none';
+    resultWrap.classList.add('active');
+
+    const action = json.action || 'filter';
+    resultTag.textContent = action.replace('_', ' ') + (json.detail ? ` · ${json.detail}` : '');
+    resultTag.className   = 'result-action-tag rat-' + action;
+    resultBar.classList.add('active');
+
+  } catch (err) {
+    showToast(err.message || 'Network error');
+  } finally {
+    setLoading(false);
+  }
+}
+
+function setLoading(on, label = 'processing…') {
+  runBtn.disabled = on;
+  spinLabel.textContent = label;
+  if (on) {
+    spinner.classList.add('active');
+    resultWrap.classList.remove('active');
+    resultBar.classList.remove('active');
+    resultPlace.style.display = 'none';
+  } else {
+    spinner.classList.remove('active');
+  }
+}
+
+/* ── download ─────────────────────────────────────────────────────────── */
+function downloadResult() {
+  if (!resultUri) return;
+  const ext = resultUri.startsWith('data:image/png') ? 'png' : 'jpg';
+  const a = document.createElement('a');
+  a.href     = resultUri;
+  a.download = `pixedit_result.${ext}`;
+  a.click();
+}
+
+/* ── utils ────────────────────────────────────────────────────────────── */
+function setPrompt(text) {
+  promptInput.value = text;
+  promptInput.dispatchEvent(new Event('input'));
+  promptInput.focus();
+}
+
+let _toastTimer = null;
+function showToast(msg) {
+  toast.textContent = msg;
+  toast.classList.add('show');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => toast.classList.remove('show'), 3500);
+}
+</script>
+</body>
+</html>
