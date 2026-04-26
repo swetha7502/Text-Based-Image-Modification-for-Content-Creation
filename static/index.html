@@ -203,6 +203,9 @@ header .spacer { flex: 1; }
 }
 .icon-btn:hover { border-color: var(--accent); color: var(--accent); }
 .icon-btn svg { width: 14px; height: 14px; }
+.icon-btn:disabled { opacity: 0.25; cursor: not-allowed; }
+.icon-btn:disabled:hover { border-color: var(--border2); color: var(--muted2); }
+.step-counter { font-size: 10px; color: var(--muted); letter-spacing: 1px; margin: 0 auto; }
 
 /* ── result area ──────────────────────────────────────────────────────── */
 .result-area {
@@ -506,6 +509,14 @@ header .spacer { flex: 1; }
     <div class="panel-label">output</div>
 
     <div class="result-area">
+      <div class="img-actions" id="history-actions" style="z-index:5">
+        <button class="icon-btn" id="undo-btn" title="Undo (Ctrl+Z)" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a5 5 0 0 1 0 10h-1"/></svg>
+        </button>
+        <button class="icon-btn" id="redo-btn" title="Redo (Ctrl+Shift+Z)" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14l5-5-5-5"/><path d="M20 9H10a5 5 0 0 0 0 10h1"/></svg>
+        </button>
+      </div>
       <div class="result-placeholder" id="result-placeholder">
         <div class="big-icon">◈</div>
         <p>Upload an image<br/>then describe what to change.</p>
@@ -522,6 +533,7 @@ header .spacer { flex: 1; }
 
       <div class="result-bar" id="result-bar">
         <span class="result-action-tag" id="result-tag"></span>
+        <span class="step-counter" id="step-counter"></span>
         <button class="dl-btn" onclick="downloadResult()">↓ save</button>
       </div>
     </div>
@@ -570,8 +582,10 @@ header .spacer { flex: 1; }
 <!-- ── JS ─────────────────────────────────────────────────────────────────── -->
 <script>
 /* ── state ────────────────────────────────────────────────────────────── */
-let srcDataUri   = null;
-let resultUri    = null;
+let srcDataUri      = null;
+const HISTORY_MAX   = 20;
+let history         = [];   // [{ uri, action, detail }, …]
+let historyPointer  = -1;   // -1 = no edits yet (placeholder shown)
 
 /* ── element refs ─────────────────────────────────────────────────────── */
 const dropZone     = document.getElementById('drop-zone');
@@ -591,6 +605,9 @@ const resultTag    = document.getElementById('result-tag');
 const intentBadge  = document.getElementById('intent-badge');
 const intentDetail = document.getElementById('intent-detail');
 const toast        = document.getElementById('toast');
+const undoBtn      = document.getElementById('undo-btn');
+const redoBtn      = document.getElementById('redo-btn');
+const stepCounter  = document.getElementById('step-counter');
 
 /* ── file loading ─────────────────────────────────────────────────────── */
 dropZone.addEventListener('click', () => fileInput.click());
@@ -615,6 +632,9 @@ function loadFile(file) {
     previewImg.src = srcDataUri;
     dropZone.classList.add('hidden');
     imgFrame.classList.add('active');
+    history = [];
+    historyPointer = -1;
+    updateHistoryButtons();
   };
   reader.readAsDataURL(file);
 }
@@ -625,6 +645,10 @@ clearBtn.addEventListener('click', () => {
   imgFrame.classList.remove('active');
   dropZone.classList.remove('hidden');
   fileInput.value = '';
+  history = [];
+  historyPointer = -1;
+  showHistoryState();
+  updateHistoryButtons();
 });
 
 /* ── live intent preview ──────────────────────────────────────────────── */
@@ -679,34 +703,31 @@ async function runEdit() {
   setLoading(true, 'processing…');
 
   try {
+    const inputImage = historyPointer >= 0 ? history[historyPointer].uri : srcDataUri;
     const res  = await fetch('/edit', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ image: srcDataUri, prompt }),
+      body:    JSON.stringify({ image: inputImage, prompt }),
     });
     const json = await res.json();
 
     if (!res.ok) {
       showToast(json.error || 'Server error');
-      setLoading(false);
       return;
     }
 
-    resultUri     = json.result;
-    resultImg.src = resultUri;
-
-    resultPlace.style.display = 'none';
-    resultWrap.classList.add('active');
-
-    const action = json.action || 'filter';
-    resultTag.textContent = action.replace('_', ' ') + (json.detail ? ` · ${json.detail}` : '');
-    resultTag.className   = 'result-action-tag rat-' + action;
-    resultBar.classList.add('active');
+    // truncate any undone future states, then push the new snapshot
+    history = history.slice(0, historyPointer + 1);
+    history.push({ uri: json.result, action: json.action || 'filter', detail: json.detail || '' });
+    if (history.length > HISTORY_MAX) history.shift();
+    historyPointer = history.length - 1;
+    updateHistoryButtons();
 
   } catch (err) {
     showToast(err.message || 'Network error');
   } finally {
     setLoading(false);
+    showHistoryState();
   }
 }
 
@@ -723,12 +744,66 @@ function setLoading(on, label = 'processing…') {
   }
 }
 
+/* ── history helpers ──────────────────────────────────────────────────── */
+function updateHistoryButtons() {
+  undoBtn.disabled = (historyPointer < 0);
+  redoBtn.disabled = (historyPointer >= history.length - 1);
+  stepCounter.textContent = historyPointer >= 0
+    ? `${historyPointer + 1} / ${history.length}`
+    : '';
+}
+
+function showHistoryState() {
+  if (historyPointer < 0) {
+    resultWrap.classList.remove('active');
+    resultBar.classList.remove('active');
+    resultPlace.style.display = '';
+  } else {
+    const entry = history[historyPointer];
+    resultImg.src = entry.uri;
+    const action  = entry.action || 'filter';
+    resultTag.textContent = action.replace('_', ' ') + (entry.detail ? ` · ${entry.detail}` : '');
+    resultTag.className   = 'result-action-tag rat-' + action;
+    resultPlace.style.display = 'none';
+    resultWrap.classList.add('active');
+    resultBar.classList.add('active');
+  }
+}
+
+function undo() {
+  if (historyPointer < 0) return;
+  historyPointer--;
+  showHistoryState();
+  updateHistoryButtons();
+}
+
+function redo() {
+  if (historyPointer >= history.length - 1) return;
+  historyPointer++;
+  showHistoryState();
+  updateHistoryButtons();
+}
+
+undoBtn.addEventListener('click', undo);
+redoBtn.addEventListener('click', redo);
+
+/* ── keyboard shortcuts ───────────────────────────────────────────────── */
+document.addEventListener('keydown', e => {
+  if (document.activeElement === promptInput) return;
+  const mac  = e.metaKey;
+  const ctrl = e.ctrlKey;
+  if ((mac || ctrl) && !e.shiftKey && e.key === 'z') { e.preventDefault(); undo(); }
+  if ((mac || ctrl) &&  e.shiftKey && e.key === 'z') { e.preventDefault(); redo(); }
+  if (ctrl && !e.shiftKey && e.key === 'y')           { e.preventDefault(); redo(); }
+});
+
 /* ── download ─────────────────────────────────────────────────────────── */
 function downloadResult() {
-  if (!resultUri) return;
-  const ext = resultUri.startsWith('data:image/png') ? 'png' : 'jpg';
+  if (historyPointer < 0) return;
+  const uri = history[historyPointer].uri;
+  const ext = uri.startsWith('data:image/png') ? 'png' : 'jpg';
   const a = document.createElement('a');
-  a.href     = resultUri;
+  a.href     = uri;
   a.download = `pixedit_result.${ext}`;
   a.click();
 }
