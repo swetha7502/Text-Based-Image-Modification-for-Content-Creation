@@ -108,7 +108,7 @@ def _fuzzy_fallback(prompt: str) -> dict:
             scores[fname] += len(kw)
     best = max(scores, key=scores.get)
     chosen = best if scores[best] > 0 else "cinematic"
-    print(f"[intent] fuzzy fallback → {chosen}")
+    print(f"[intent] fuzzy fallback -> {chosen}")
     return {"action": "filter", "filter": chosen}
 
 
@@ -170,7 +170,7 @@ def _claude_parse(prompt: str) -> dict:
         raw    = data["content"][0]["text"].strip()
         raw    = _re.sub(r"^```[a-z]*\n?|```$", "", raw).strip()
         intent = json.loads(raw)
-        print(f"[intent] Claude → {intent}")
+        print(f"[intent] Claude -> {intent}")
         return intent
     except Exception as exc:
         print(f"[intent] Claude failed ({exc}), fuzzy fallback")
@@ -180,7 +180,7 @@ def _claude_parse(prompt: str) -> dict:
 def parse_intent(prompt: str) -> dict:
     intent = _regex_parse(prompt)
     if intent is None:
-        print(f"[intent] regex miss → escalating: {prompt!r}")
+        print(f"[intent] regex miss -> escalating: {prompt!r}")
         intent = _claude_parse(prompt)
-    print(f"[intent] final → {intent}")
+    print(f"[intent] final -> {intent}")
     return intent

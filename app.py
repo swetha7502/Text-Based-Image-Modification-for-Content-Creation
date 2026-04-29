@@ -134,5 +134,5 @@ def edit():
 # ── run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    print(f"\n  PixEdit →  http://localhost:{port}\n")
+    print(f"\n  PixEdit ->  http://localhost:{port}\n")
     app.run(debug=True, port=port, use_reloader=False)

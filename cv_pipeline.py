@@ -14,20 +14,16 @@ Operations:
  10. depth_blur()        — Fake DOF using MiDaS depth estimation
 """
 
-# ── CUDA guard — must be FIRST, before any other import ──────────────────────
+# Existing CV models (SAM, Grounded-DINO, LaMa, rembg) run on CPU.
+# SD inpainting uses GPU when available — handled in sd_inpaint.py.
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
-
 import torch
-torch.cuda.is_available   = lambda: False
-torch.cuda.device_count   = lambda: 0
-torch.cuda.current_device = lambda: 0
+
 DEVICE = torch.device("cpu")
 
 # Patch SimpleLama's baked-in default (evaluated at class-definition time)
 import simple_lama_inpainting.models.model as _lama_mod
 _lama_mod.SimpleLama.__init__.__defaults__ = (torch.device("cpu"),)
-# ─────────────────────────────────────────────────────────────────────────────
 
 import pathlib, urllib.request, warnings, colorsys
 import numpy as np
@@ -35,7 +31,8 @@ import cv2
 from PIL import Image, ImageFilter, ImageEnhance
 
 warnings.filterwarnings("ignore")
-print("[cv] CPU-only mode active")
+_cv_device_label = "CUDA" if torch.cuda.is_available() else "CPU"
+print(f"[cv] CV pipeline active (SAM/DINO/LaMa on CPU, SD on {_cv_device_label})")
 
 # ── model paths ───────────────────────────────────────────────────────────────
 MODELS_DIR     = pathlib.Path.home() / ".pixedit_models"
@@ -171,74 +168,50 @@ def inpaint_remove(pil_img: Image.Image, mask: np.ndarray) -> Image.Image:
 # ═════════════════════════════════════════════════════════════════════════════
 
 def replace_object(pil_img: Image.Image, object_text: str, replacement_text: str) -> Image.Image:
-    """
-    Replace a named object with a description of what should be there.
+    print(f"[cv] Replacing '{object_text}' with '{replacement_text}' ...")
 
-    Pipeline:
-      1. Grounded-DINO + SAM  →  precise mask of object
-      2. LaMa                 →  clean inpaint (erase object, fill background)
-      3. Texture synthesis    →  generate replacement appearance from replacement_text
-                                 using OpenCV's seamlessClone + color/texture matching
-      4. Blend result back    →  paste replacement into original mask region
-
-    Since we run CPU-only (no Stable Diffusion), the replacement is built by:
-      - Finding the dominant color/texture described in replacement_text
-        (mapped from a vocabulary of visual descriptors)
-      - Synthesising a texture patch that matches: shape from mask,
-        appearance from replacement description
-      - Seamlessly blending it into the original image
-    """
-    print(f"[cv] Replacing '{object_text}' with '{replacement_text}' …")
-
-    # Step 1: segment original object
     mask = segment_object(pil_img, object_text)
     if mask is None:
         return pil_img
 
+    # ── SD inpainting (primary path) ──────────────────────────────────────────
+    try:
+        from sd_inpaint import sd_replace
+        prompt = f"{replacement_text}, photorealistic, high quality, detailed"
+        return sd_replace(pil_img, mask, prompt)
+    except Exception as _sd_exc:
+        print(f"[cv] SD inpainting unavailable ({_sd_exc}), using synthesis fallback")
+
+    # ── fallback: LaMa fill + color synthesis (unchanged) ─────────────────────
     rgb = pil_to_rgb(pil_img)
     h, w = rgb.shape[:2]
 
-    # Step 2: LaMa-inpaint the region (clean background)
+    # LaMa fills the object region with natural background
     lama        = _load_lama()
     mask_pil    = Image.fromarray(mask).convert("L")
     bg_img      = lama(pil_img.convert("RGB"), mask_pil)
-    bg          = pil_to_rgb(bg_img)
+    bg_img_resized = bg_img.resize((w, h), Image.LANCZOS)
 
-    # Step 3: synthesise replacement patch
+    # Build replacement content
     replacement_patch = _synthesise_replacement(rgb, mask, replacement_text)
 
-    # Step 4: seamless clone replacement onto clean background
-    # Find centre of mask for seamlessClone anchor
-    moments = cv2.moments(mask)
-    if moments["m00"] == 0:
-        return bg_img
-    cx = int(moments["m10"] / moments["m00"])
-    cy = int(moments["m01"] / moments["m00"])
-    cx = np.clip(cx, 1, w-2)
-    cy = np.clip(cy, 1, h-2)
+    if replacement_patch is None:
+        # No color/texture inferable — return LaMa result (object erased)
+        print(f"[cv] No color inferred from '{replacement_text}', returning inpainted result")
+        return bg_img_resized
 
-    # LaMa may return a slightly different size — normalise everything to (h, w)
-    bg_img_resized = bg_img.resize((w, h), Image.LANCZOS)
-    bg             = pil_to_rgb(bg_img_resized)
-    patch_resized  = cv2.resize(replacement_patch, (w, h), interpolation=cv2.INTER_LINEAR)
-    mask_resized   = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+    bg           = pil_to_rgb(bg_img_resized)
+    patch_resized = cv2.resize(replacement_patch, (w, h), interpolation=cv2.INTER_LINEAR)
+    mask_resized  = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
 
-    # seamlessClone requires the patch bounding box to be fully inside the destination
-    # Shrink the mask rect by a few pixels so the anchor never hits the border
     ys, xs = np.where(mask_resized > 0)
     if len(xs) == 0:
         return bg_img_resized
-    x1, x2 = int(xs.min()), int(xs.max())
-    y1, y2 = int(ys.min()), int(ys.max())
-    pad = 4
-    x1c = np.clip(x1 + pad, 0, w-1)
-    x2c = np.clip(x2 - pad, 0, w-1)
-    y1c = np.clip(y1 + pad, 0, h-1)
-    y2c = np.clip(y2 - pad, 0, h-1)
-    cx  = int((x1c + x2c) / 2)
-    cy  = int((y1c + y2c) / 2)
-    cx  = np.clip(cx, 1, w-2)
-    cy  = np.clip(cy, 1, h-2)
+
+    cx = int((int(xs.min()) + int(xs.max())) / 2)
+    cy = int((int(ys.min()) + int(ys.max())) / 2)
+    cx = int(np.clip(cx, 1, w - 2))
+    cy = int(np.clip(cy, 1, h - 2))
 
     try:
         result_bgr = cv2.seamlessClone(
@@ -250,124 +223,117 @@ def replace_object(pil_img: Image.Image, object_text: str, replacement_text: str
         )
         return bgr_to_pil(result_bgr)
     except cv2.error:
-        # fallback: simple alpha blend — shapes now guaranteed to match
-        alpha   = (mask_resized[:,:,None] / 255.0)
-        blended = (patch_resized * alpha + bg * (1 - alpha)).astype(np.uint8)
-        return Image.fromarray(blended)
+        soft    = cv2.GaussianBlur(mask_resized.astype(np.float32), (15, 15), 0) / 255.0
+        soft    = soft[:, :, None]
+        blended = (patch_resized.astype(np.float32) * soft +
+                   bg.astype(np.float32) * (1 - soft))
+        return Image.fromarray(np.clip(blended, 0, 255).astype(np.uint8))
 
 
-def _synthesise_replacement(rgb: np.ndarray, mask: np.ndarray, description: str) -> np.ndarray:
+def _synthesise_replacement(rgb: np.ndarray, mask: np.ndarray, description: str):
     """
-    CPU-only texture synthesis: builds a patch that looks like `description`
-    shaped to the masked region.
+    Returns an RGB patch (same size as rgb) with the mask region recolored to
+    match `description`. Returns None if no color/texture can be inferred.
 
-    Strategy:
-      1. Parse description for color keywords → target BGR color
-      2. Parse description for texture keywords → texture pattern
-      3. Sample surrounding context pixels → blend for realism
-      4. Apply target color in LAB space to preserve luminance variation
+    Uses the original object pixels as the base (preserves shape and lighting)
+    then shifts their color in LAB space toward the target.
     """
-    h, w = rgb.shape[:2]
     desc = description.lower()
 
-    # ── color vocabulary ──────────────────────────────────────────────────────
-    COLOR_MAP = {
-        "red":      (0,   0,   200),  "crimson":  (60,  20,  220),
-        "orange":   (0,   140, 255),  "yellow":   (0,   220, 255),
-        "green":    (30,  150, 30),   "lime":     (0,   255, 50),
-        "blue":     (200, 100, 0),    "navy":     (128, 0,   0),
-        "purple":   (180, 0,   130),  "pink":     (180, 105, 255),
-        "white":    (240, 240, 240),  "black":    (20,  20,  20),
-        "gray":     (128, 128, 128),  "grey":     (128, 128, 128),
-        "brown":    (42,  82,  139),  "beige":    (196, 228, 245),
-        "gold":     (0,   215, 255),  "silver":   (192, 192, 192),
-        "sky":      (235, 206, 135),  "wood":     (42,  82,  139),
-        "grass":    (34,  139, 34),   "stone":    (169, 169, 169),
-        "concrete": (169, 169, 169),  "metal":    (160, 160, 160),
-        "fire":     (0,   69,  255),  "water":    (180, 130, 70),
-        "sand":     (180, 200, 210),  "snow":     (250, 250, 255),
-        "neon":     (0,   255, 255),  "dark":     (40,  40,  40),
-        "light":    (220, 220, 220),  "bright":   (255, 200, 100),
-        "transparent": (128, 128, 128),
+    # RGB color vocabulary — longest keywords first to avoid short-match shadowing
+    COLOR_MAP_RGB = {
+        "concrete": (169, 169, 169), "leather":  (101,  67,  33),
+        "stormy":   ( 80,  80, 100), "golden":   (255, 200,  50),
+        "cloudy":   (180, 180, 200), "wooden":   (160, 100,  50),
+        "chrome":   (200, 200, 210), "crimson":  (220,  20,  60),
+        "maroon":   (128,   0,   0), "silver":   (192, 192, 192),
+        "denim":    ( 21,  96, 189), "coral":    (255, 127,  80),
+        "azure":    (  0, 127, 255), "ocean":    (  0, 105, 148),
+        "storm":    ( 70,  70,  90), "cloud":    (200, 200, 210),
+        "steel":    (150, 160, 170), "grass":    ( 34, 139,  34),
+        "beige":    (245, 228, 196), "stone":    (169, 169, 169),
+        "metal":    (160, 160, 160), "neon":     (255, 255,   0),
+        "rust":     (183,  65,  14), "sand":     (210, 200, 180),
+        "snow":     (255, 250, 250), "fire":     (255,  69,   0),
+        "teal":     (  0, 128, 128), "cyan":     (  0, 200, 200),
+        "gold":     (255, 215,   0), "lime":     ( 50, 255,   0),
+        "navy":     (  0,   0, 128), "pink":     (255, 105, 180),
+        "wood":     (139,  82,  42), "dark":     ( 40,  40,  40),
+        "dusk":     (180,  80,  50), "dawn":     (255, 150, 100),
+        "red":      (200,   0,   0), "blue":     (  0, 100, 200),
+        "sky":      (135, 206, 235), "sea":      (  0, 119, 190),
+        "tan":      (210, 180, 140), "fog":      (200, 200, 210),
+        "green":    ( 30, 150,  30), "brown":    (139,  82,  42),
+        "water":    ( 70, 130, 180), "glass":    (200, 220, 240),
+        "white":    (240, 240, 240), "black":    ( 20,  20,  20),
+        "gray":     (128, 128, 128), "grey":     (128, 128, 128),
+        "light":    (220, 220, 220), "bright":   (100, 200, 255),
+        "orange":   (255, 140,   0), "yellow":   (255, 220,   0),
+        "purple":   (130,   0, 180), "sunset":   (255, 120,  50),
     }
 
-    target_bgr = None
-    for kw, bgr in COLOR_MAP.items():
+    target_rgb = None
+    for kw, rgb_color in COLOR_MAP_RGB.items():
         if kw in desc:
-            target_bgr = np.array(bgr, dtype=np.float32)
+            target_rgb = np.array(rgb_color, dtype=np.float32)
             break
 
-    # ── sample context — use surrounding ring of pixels as base texture ───────
-    kernel_big   = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (45, 45))
-    dilated      = cv2.dilate(mask, kernel_big, iterations=3)
-    context_mask = cv2.subtract(dilated, mask)
+    if target_rgb is None:
+        return None
 
-    rgb_bgr = rgb[:,:,::-1].copy()
+    # Use original pixels as base — preserves object shape and luminance structure
+    patch = rgb.copy().astype(np.float32)
+    mask_bool = mask > 0
 
-    if context_mask.sum() > 0:
-        context_pixels = rgb_bgr[context_mask > 0]
-        # tile context pixels to fill the mask region
-        mask_pixels_count = int((mask > 0).sum())
-        if mask_pixels_count > 0 and len(context_pixels) > 0:
-            tiled = context_pixels[
-                np.random.choice(len(context_pixels), mask_pixels_count, replace=True)
-            ]
-            patch = rgb_bgr.copy()
-            patch[mask > 0] = tiled
-        else:
-            patch = rgb_bgr.copy()
-    else:
-        patch = rgb_bgr.copy()
+    if mask_bool.sum() > 0:
+        bgr      = patch[:, :, ::-1].astype(np.uint8)
+        lab      = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab).astype(np.float32)
 
-    # ── apply target color in LAB space ──────────────────────────────────────
-    if target_bgr is not None:
-        lab = cv2.cvtColor(patch, cv2.COLOR_BGR2Lab).astype(np.float32)
-        # compute mean L of mask region to preserve relative brightness
-        mask_bool = mask > 0
-        if mask_bool.sum() > 0:
-            mean_L = float(lab[:,:,0][mask_bool].mean())
-            # convert target to LAB
-            target_pixel = np.array([[target_bgr]], dtype=np.uint8)
-            target_lab   = cv2.cvtColor(target_pixel, cv2.COLOR_BGR2Lab)[0,0].astype(np.float32)
-            # apply target A,B channels; blend L toward target with 40% weight
-            lab[mask_bool, 1] = target_lab[1]
-            lab[mask_bool, 2] = target_lab[2]
-            lab[mask_bool, 0] = lab[mask_bool, 0] * 0.6 + target_lab[0] * 0.4
-            patch = cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_Lab2BGR)
+        target_bgr = target_rgb[::-1].reshape(1, 1, 3).astype(np.uint8)
+        target_lab = cv2.cvtColor(target_bgr, cv2.COLOR_BGR2Lab)[0, 0].astype(np.float32)
 
-    # ── texture modifiers ──────────────────────────────────────────────────────
+        # Full chroma shift (A, B channels) + 50/50 luminance blend
+        lab[mask_bool, 1] = target_lab[1]
+        lab[mask_bool, 2] = target_lab[2]
+        lab[mask_bool, 0] = lab[mask_bool, 0] * 0.5 + target_lab[0] * 0.5
+
+        result_bgr = cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_Lab2BGR)
+        patch = result_bgr[:, :, ::-1].astype(np.float32)
+
+    patch_u8  = np.clip(patch, 0, 255).astype(np.uint8)
+    patch_bgr = patch_u8[:, :, ::-1].copy()
+
+    # Texture modifiers
     if any(kw in desc for kw in ["smooth", "clean", "flat", "solid", "matte"]):
-        patch_masked = patch.copy()
-        if (mask > 0).sum() > 0:
-            mean_color = patch[mask > 0].mean(axis=0).astype(np.uint8)
-            patch_masked[mask > 0] = mean_color
-        patch = patch_masked
+        if mask_bool.sum() > 0:
+            mean_color = patch_bgr[mask_bool].mean(axis=0).astype(np.uint8)
+            patch_bgr[mask_bool] = mean_color
 
-    elif any(kw in desc for kw in ["rough", "textured", "grainy", "stone", "concrete", "brick"]):
-        noise = np.random.normal(0, 25, patch.shape).astype(np.float32)
-        patch_f = patch.astype(np.float32) + noise * (mask[:,:,None] / 255.0)
-        patch = np.clip(patch_f, 0, 255).astype(np.uint8)
+    elif any(kw in desc for kw in ["rough", "textured", "grainy", "stone", "concrete",
+                                    "brick", "leather", "rustic"]):
+        noise     = np.random.normal(0, 20, patch_bgr.shape).astype(np.float32)
+        patch_bgr = np.clip(patch_bgr.astype(np.float32) + noise * (mask[:, :, None] / 255.0),
+                            0, 255).astype(np.uint8)
 
-    elif any(kw in desc for kw in ["glossy", "shiny", "metallic", "glass", "chrome"]):
-        # add specular highlight
-        patch_f = patch.astype(np.float32)
-        cy_m = np.where(mask > 0)[0]
-        cx_m = np.where(mask > 0)[1]
+    elif any(kw in desc for kw in ["glossy", "shiny", "metallic", "glass", "chrome", "polished"]):
+        patch_f       = patch_bgr.astype(np.float32)
+        cy_m, cx_m    = np.where(mask > 0)
         if len(cy_m) > 0:
-            spec_y = int(cy_m.min() + (cy_m.max()-cy_m.min())*0.25)
-            spec_x = int(cx_m.min() + (cx_m.max()-cx_m.min())*0.5)
-            spec_patch = np.zeros_like(patch_f)
-            cv2.circle(spec_patch, (spec_x, spec_y), max(5, min(30, (cx_m.max()-cx_m.min())//4)), (255,255,255), -1)
-            spec_patch = cv2.GaussianBlur(spec_patch, (31,31), 0)
-            patch_f += spec_patch * 0.5 * (mask[:,:,None]/255.0)
-        patch = np.clip(patch_f, 0, 255).astype(np.uint8)
+            spec_y    = int(cy_m.min() + (cy_m.max() - cy_m.min()) * 0.25)
+            spec_x    = int(cx_m.min() + (cx_m.max() - cx_m.min()) * 0.50)
+            spec_p    = np.zeros_like(patch_f)
+            radius    = max(5, min(30, (cx_m.max() - cx_m.min()) // 4))
+            cv2.circle(spec_p, (spec_x, spec_y), radius, (255, 255, 255), -1)
+            spec_p    = cv2.GaussianBlur(spec_p, (31, 31), 0)
+            patch_f  += spec_p * 0.5 * (mask[:, :, None] / 255.0)
+        patch_bgr = np.clip(patch_f, 0, 255).astype(np.uint8)
 
     elif any(kw in desc for kw in ["blurry", "soft", "foggy", "hazy", "blur"]):
-        blurred = cv2.GaussianBlur(patch, (21,21), 0)
-        alpha   = mask[:,:,None] / 255.0
-        patch   = (blurred * alpha + patch * (1-alpha)).astype(np.uint8)
+        blurred   = cv2.GaussianBlur(patch_bgr, (21, 21), 0)
+        alpha     = mask[:, :, None] / 255.0
+        patch_bgr = (blurred * alpha + patch_bgr * (1 - alpha)).astype(np.uint8)
 
-    return patch[:,:,::-1]   # return RGB
+    return patch_bgr[:, :, ::-1]  # return RGB
 
 
 # ═════════════════════════════════════════════════════════════════════════════
