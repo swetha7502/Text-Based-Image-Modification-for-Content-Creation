@@ -1,24 +1,25 @@
 """
-sd_inpaint.py — Stable Diffusion inpainting for the replace_object pipeline.
+sd_inpaint.py — Crop-based SD inpainting for the replace_object pipeline.
 
-Loaded lazily on first use. Falls back transparently if diffusers is not
-installed or if the model download fails.
+Strategy:
+  1. Crop the bounding box of the mask (+ padding) — reduces background
+     context so the model has less "complete the scene" bias.
+  2. Run StableDiffusionInpaintPipeline on the crop with guidance=15
+     (strong prompt adherence) — model generates the replacement object.
+  3. Resize crop result back, composite with a soft Gaussian mask.
 
-Input contract (from segment_object):
-  pil_img  : PIL.Image RGB
-  mask_np  : H×W uint8, 255 = region to replace, 0 = keep
-  prompt   : plain-text description of what should appear in the masked region
+Uses runwayml/stable-diffusion-inpainting (already cached locally).
 """
 
+import cv2
 import torch
 import numpy as np
 from PIL import Image
 
 _sd_pipe  = None
 _SD_MODEL = "runwayml/stable-diffusion-inpainting"
-_SD_SIZE  = 512   # SD 1.x native resolution
+_SD_SIZE  = 512
 
-# Detect GPU once at import time
 _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _DTYPE  = torch.float16 if _DEVICE == "cuda" else torch.float32
 
@@ -30,9 +31,7 @@ def _load_pipeline():
 
     from diffusers import StableDiffusionInpaintPipeline
 
-    print(f"[sd] Loading {_SD_MODEL} on {_DEVICE.upper()}")
-    print("[sd] First run will download ~5 GB of model weights — please wait ...")
-
+    print(f"[sd] Loading {_SD_MODEL} on {_DEVICE.upper()} ...")
     _sd_pipe = StableDiffusionInpaintPipeline.from_pretrained(
         _SD_MODEL,
         torch_dtype=_DTYPE,
@@ -40,11 +39,9 @@ def _load_pipeline():
         requires_safety_checker=False,
     )
     _sd_pipe = _sd_pipe.to(_DEVICE)
-
     if _DEVICE == "cpu":
         _sd_pipe.enable_attention_slicing(1)
-
-    print(f"[sd] Pipeline ready ({_DEVICE.upper()}, {'fp16' if _DTYPE == torch.float16 else 'fp32'}).")
+    print(f"[sd] Ready ({_DEVICE.upper()}, {'fp16' if _DTYPE == torch.float16 else 'fp32'}).")
     return _sd_pipe
 
 
@@ -52,41 +49,64 @@ def sd_replace(
     pil_img: Image.Image,
     mask_np: np.ndarray,
     prompt: str,
-    negative_prompt: str = "blurry, deformed, ugly, bad anatomy, watermark, text, noise",
-    num_steps: int = 20,
-    guidance_scale: float = 7.5,
+    negative_prompt: str = (
+        "blurry, deformed, ugly, bad anatomy, watermark, text, "
+        "duplicate, out of frame, artifacts, low quality, background"
+    ),
+    num_steps: int = 30,
+    guidance_scale: float = 15.0,
 ) -> Image.Image:
     """
-    Run SD inpainting on pil_img inside the region defined by mask_np.
+    Replace the masked object using crop-based SD inpainting.
 
-    Args:
-        pil_img:         Original image (PIL RGB).
-        mask_np:         H×W uint8 mask from segment_object (255 = inpaint).
-        prompt:          What to generate in the masked region.
-        negative_prompt: What to avoid.
-        num_steps:       Denoising steps (20 = fast, 50 = quality).
-        guidance_scale:  Prompt adherence (7–9 is typical).
-
-    Returns:
-        PIL Image at the original resolution with the masked region replaced.
+    Crops to the mask bounding box so the model sees mostly the object
+    region rather than the full background, then inpaints at guidance=15
+    for strong text-prompt adherence.
     """
     pipe = _load_pipeline()
 
-    orig_w, orig_h = pil_img.size
+    orig_arr = np.array(pil_img.convert("RGB"))
+    H, W = orig_arr.shape[:2]
 
-    # Resize to SD native resolution
-    img_sd   = pil_img.convert("RGB").resize((_SD_SIZE, _SD_SIZE), Image.LANCZOS)
-    mask_sd  = Image.fromarray(mask_np).convert("L").resize((_SD_SIZE, _SD_SIZE), Image.NEAREST)
+    ys, xs = np.where(mask_np > 0)
+    if len(xs) == 0:
+        return pil_img
 
-    print(f"[sd] Inpainting: '{prompt}' ({num_steps} steps) ...")
+    # Crop to the mask bounding box + padding
+    pad = 40
+    y1 = max(0, int(ys.min()) - pad)
+    y2 = min(H, int(ys.max()) + pad)
+    x1 = max(0, int(xs.min()) - pad)
+    x2 = min(W, int(xs.max()) + pad)
+
+    crop_pil  = pil_img.crop((x1, y1, x2, y2)).convert("RGB")
+    mask_crop = Image.fromarray(mask_np[y1:y2, x1:x2]).convert("L")
+    crop_w, crop_h = crop_pil.size
+
+    # Resize crop + mask to SD native resolution
+    crop_sd = crop_pil.resize((_SD_SIZE, _SD_SIZE), Image.LANCZOS)
+    mask_sd = mask_crop.resize((_SD_SIZE, _SD_SIZE), Image.NEAREST)
+
+    print(f"[sd] Inpainting crop: '{prompt}'  cfg={guidance_scale}  steps={num_steps} ...")
     result_sd = pipe(
-        prompt          = prompt,
-        negative_prompt = negative_prompt,
-        image           = img_sd,
-        mask_image      = mask_sd,
+        prompt              = prompt,
+        negative_prompt     = negative_prompt,
+        image               = crop_sd,
+        mask_image          = mask_sd,
         num_inference_steps = num_steps,
-        guidance_scale  = guidance_scale,
+        guidance_scale      = guidance_scale,
     ).images[0]
 
-    # Restore original resolution
-    return result_sd.resize((orig_w, orig_h), Image.LANCZOS)
+    # Resize generated crop back to original crop dimensions
+    result_crop = np.array(result_sd.resize((crop_w, crop_h), Image.LANCZOS), dtype=np.float32)
+    orig_crop   = orig_arr[y1:y2, x1:x2].astype(np.float32)
+
+    # Soft Gaussian mask for smooth blending at object boundary
+    mask_f    = mask_np[y1:y2, x1:x2].astype(np.float32) / 255.0
+    soft_mask = cv2.GaussianBlur(mask_f, (31, 31), 0)[:, :, None]
+
+    blended           = result_crop * soft_mask + orig_crop * (1.0 - soft_mask)
+    result_arr        = orig_arr.copy().astype(np.float32)
+    result_arr[y1:y2, x1:x2] = blended
+
+    return Image.fromarray(np.clip(result_arr, 0, 255).astype(np.uint8))

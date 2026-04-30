@@ -174,13 +174,16 @@ def replace_object(pil_img: Image.Image, object_text: str, replacement_text: str
     if mask is None:
         return pil_img
 
-    # ── SD inpainting (primary path) ──────────────────────────────────────────
+    # ── SDEdit replacement (primary path) ────────────────────────────────────
     try:
         from sd_inpaint import sd_replace
-        prompt = f"{replacement_text}, photorealistic, high quality, detailed"
+        prompt = (
+            f"{replacement_text}, photorealistic, sharp focus, "
+            "natural lighting, high resolution, seamlessly integrated"
+        )
         return sd_replace(pil_img, mask, prompt)
     except Exception as _sd_exc:
-        print(f"[cv] SD inpainting unavailable ({_sd_exc}), using synthesis fallback")
+        print(f"[cv] SDEdit unavailable ({_sd_exc}), using synthesis fallback")
 
     # ── fallback: LaMa fill + color synthesis (unchanged) ─────────────────────
     rgb = pil_to_rgb(pil_img)
