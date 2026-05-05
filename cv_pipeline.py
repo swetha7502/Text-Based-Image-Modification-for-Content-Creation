@@ -102,11 +102,57 @@ def pil_to_rgb(img):  return np.array(img.convert("RGB"))
 # 1. TEXT-GUIDED SEGMENTATION  (Grounded-DINO + SAM)
 # ═════════════════════════════════════════════════════════════════════════════
 
-def segment_object(pil_img: Image.Image, text: str):
-    """
-    Returns binary mask (H×W uint8, 0/255) for the named object, or None.
-    Pipeline: Grounded-DINO → bounding boxes → SAM → pixel masks
-    """
+# def segment_object(pil_img: Image.Image, text: str):
+#     """
+#     Returns binary mask (H×W uint8, 0/255) for the named object, or None.
+#     Pipeline: Grounded-DINO → bounding boxes → SAM → pixel masks
+#     """
+#     import groundingdino.datasets.transforms as GDT
+#     from groundingdino.util.inference import predict
+
+#     gdino     = _load_gdino()
+#     predictor = _load_sam()
+#     rgb       = pil_to_rgb(pil_img)
+#     h, w      = rgb.shape[:2]
+
+#     # MUST use groundingdino's own GDT transforms — torchvision causes
+#     # "ValueError: not supported" inside nested_tensor_from_tensor_list
+#     transform = GDT.Compose([
+#         GDT.RandomResize([800], max_size=1333),
+#         GDT.ToTensor(),
+#         GDT.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+#     ])
+#     img_tensor, _ = transform(pil_img.convert("RGB"), None)
+#     img_tensor    = img_tensor.to(DEVICE)
+
+#     with torch.no_grad():
+#         boxes, logits, phrases = predict(
+#             model=gdino, image=img_tensor, caption=text,
+#             box_threshold=0.30, text_threshold=0.25,
+#             device="cpu",  # predict() defaults to "cuda" — must override
+#         )
+
+#     if boxes is None or len(boxes) == 0:
+#         print(f"[cv] '{text}' not found in image")
+#         return None
+
+#     b = boxes.clone()
+#     boxes_xyxy = torch.stack([
+#         (b[:,0]-b[:,2]/2)*w, (b[:,1]-b[:,3]/2)*h,
+#         (b[:,0]+b[:,2]/2)*w, (b[:,1]+b[:,3]/2)*h,
+#     ], dim=1).numpy()
+#     print(f"[cv] Found {len(boxes_xyxy)} box(es): {phrases}")
+
+#     predictor.set_image(rgb)
+#     combined = np.zeros((h, w), dtype=bool)
+#     for box in boxes_xyxy:
+#         masks, scores, _ = predictor.predict(box=box, multimask_output=True)
+#         combined |= masks[np.argmax(scores)]
+
+#     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15,15))
+#     return cv2.dilate(combined.astype(np.uint8)*255, kernel, iterations=2)
+
+def segment_object(pil_img, text):
     import groundingdino.datasets.transforms as GDT
     from groundingdino.util.inference import predict
 
@@ -115,8 +161,6 @@ def segment_object(pil_img: Image.Image, text: str):
     rgb       = pil_to_rgb(pil_img)
     h, w      = rgb.shape[:2]
 
-    # MUST use groundingdino's own GDT transforms — torchvision causes
-    # "ValueError: not supported" inside nested_tensor_from_tensor_list
     transform = GDT.Compose([
         GDT.RandomResize([800], max_size=1333),
         GDT.ToTensor(),
@@ -128,13 +172,31 @@ def segment_object(pil_img: Image.Image, text: str):
     with torch.no_grad():
         boxes, logits, phrases = predict(
             model=gdino, image=img_tensor, caption=text,
-            box_threshold=0.30, text_threshold=0.25,
-            device="cpu",  # predict() defaults to "cuda" — must override
+            box_threshold=0.30, text_threshold=0.25, device="cpu",
         )
 
     if boxes is None or len(boxes) == 0:
         print(f"[cv] '{text}' not found in image")
         return None
+
+    # ── NEW: confidence check ─────────────────────────────────────────────
+    max_confidence = float(logits.max())
+    print(f"[cv] Max confidence for '{text}': {max_confidence:.2f}")
+
+    if max_confidence < 0.50:
+        print(f"[cv] Confidence too low ({max_confidence:.2f}) — '{text}' not in image")
+        return None
+
+    # ── NEW: phrase match check ───────────────────────────────────────────
+    query_words = set(text.lower().split())
+    matched = any(
+        query_words & set(phrase.lower().split())
+        for phrase in phrases
+    )
+    if not matched:
+        print(f"[cv] DINO matched '{phrases}' but asked for '{text}' — rejecting")
+        return None
+    # ─────────────────────────────────────────────────────────────────────
 
     b = boxes.clone()
     boxes_xyxy = torch.stack([
@@ -151,7 +213,6 @@ def segment_object(pil_img: Image.Image, text: str):
 
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15,15))
     return cv2.dilate(combined.astype(np.uint8)*255, kernel, iterations=2)
-
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 2. INPAINTING — REMOVE  (LaMa)
